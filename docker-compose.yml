@@ -1,0 +1,114 @@
+# https://stackoverflow.com/questions/50592531/setting-build-args-in-docker-compose-yml-using-env-file
+# https://stackoverflow.com/questions/78098380/make-docker-env-variables-from-an-env-file-available-in-build-step-dockerfil#:~:text=env%20available%20in%20the%20Dockerfile,that%20spawn%20from%20the%20build.
+version: "3.9"
+services:
+  base:
+    environment:
+      HTTP_PROXY:
+      HTTPS_PROXY:
+    env_file:
+      - .env
+  postgres:
+    extends: base
+    image: postgres:latest
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data-local:/var/lib/postgresql/data
+  adminer:
+    extends: base
+    image: adminer:latest
+    restart: always
+    ports:
+      - "8082:8080"
+  pgadmin:
+    extends: base
+    image: dpage/pgadmin4:latest
+    restart: always
+    ports:
+      - "8081:80"
+  flyway:
+    extends: base
+    image: flyway/flyway
+    command: -outOfOrder=true -connectRetries=60 migrate
+    # depends_on:
+    #   - postgres
+    volumes:
+      - ./scripts/flyway/sql:/flyway/sql
+      - ./scripts/flyway/flyway.conf:/flyway/conf/flyway.conf
+  redis:
+    extends: base
+    image: redis:alpine
+    logging:
+      driver: none
+    ports:
+      - "6379:6379"
+  localstack:
+    extends: base
+    environment:
+      - SKIP_SSL_CERT_DOWNLOAD="1"
+      - DEBUG=1
+    image: localstack/localstack
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    volumes:
+      - type: bind
+        source: ./scripts/localstack/init-aws.sh
+        target: /etc/localstack/init/ready.d/init-aws.sh
+  backend:
+    extends: base
+    build:
+      context: backend
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - pgadmin
+      - flyway
+      - redis
+    volumes:
+      - ./backend:/app
+    ports:
+      - "7001:7001"
+    command: >
+      bash -c "pip install poetry
+      && poetry run uvicorn main:app --reload --host 0.0.0.0 --port 7001"
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost
+        - NODE_ENV=local
+    # develop:
+    #   watch:
+    #     - action: sync
+    #       path: ./frontend
+    #       target: /app
+    #       ignore:
+    #         - node_modules/
+    #     - action: rebuild
+    #       path: ./frontend/package.json
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+  skipper:
+    command:
+      - skipper
+      - -routes-file=/config.eskip
+    image: ghcr.io/zalando/skipper:latest
+    depends_on:
+      - frontend
+    ports:
+      - mode: ingress
+        target: 9090
+        published: "9090"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ./scripts/skipper/config.eskip
+        target: /config.eskip
+volumes:
+  pg-data-local:
